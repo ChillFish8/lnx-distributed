@@ -1,12 +1,10 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 use super::net;
 use crate::Result;
 
-
 #[derive(Serialize, Deserialize)]
 pub enum PeerRequest {}
-
 
 async fn test(req: Vec<u8>) -> Result<Vec<u8>> {
     todo!()
@@ -21,8 +19,6 @@ impl RaftNetwork {
         let mut nodes = net::Node::create_node(config).await?;
         let handle = nodes.handle();
 
-        Ok(Self {
-            peers: handle,
-        })
+        Ok(Self { peers: handle })
     }
 }

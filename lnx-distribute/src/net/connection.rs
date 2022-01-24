@@ -2,30 +2,28 @@ use std::io::Cursor;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::time::Duration;
+
 use anyhow::anyhow;
-
-use tokio::sync::mpsc::{self, Sender, Receiver};
-use tokio::sync::oneshot;
-use quinn::{Endpoint, NewConnection, Incoming, ReadToEndError};
-use serde::{Deserialize, Serialize};
+use quinn::{Endpoint, Incoming, NewConnection, ReadToEndError};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::oneshot;
 
-use crate::{Result, Error};
 use super::tls::{
     get_insecure_client_config,
-    get_secure_server_config,
     get_insecure_server_config,
     get_secure_client_config,
+    get_secure_server_config,
     read_cert,
     read_key,
 };
-
+use crate::{Error, Result};
 
 /// The max response buffer size.
 ///
 /// We dont really expect our peer responses to be any bigger than this.
 const MAX_BUFFER_SIZE: usize = 256 << 10;
-
 
 /// Creates a new server listener.
 ///
@@ -44,14 +42,13 @@ pub(crate) async fn create_server(
 
             get_secure_server_config(cert, key)
         },
-        None => get_insecure_server_config()
+        None => get_insecure_server_config(),
     }?;
 
     let (_endpoint, incoming) = Endpoint::server(cfg, bind)?;
 
     Ok(incoming)
 }
-
 
 struct EventHandle {
     data: Vec<u8>,
@@ -69,21 +66,27 @@ pub(crate) struct Client {
 }
 
 impl Client {
-    pub(crate) async fn send<R: DeserializeOwned + Sized>(&self, v: impl Serialize) -> Result<R> {
+    pub(crate) async fn send<R: DeserializeOwned + Sized>(
+        &self,
+        v: impl Serialize,
+    ) -> Result<R> {
         let data = bincode::serialize(&v)?;
 
         let (responder, rx) = oneshot::channel();
-        let handle = EventHandle {
-            data,
-            responder,
-        };
+        let handle = EventHandle { data, responder };
 
-        self.sender.send(EventOp::Message(handle))
+        self.sender
+            .send(EventOp::Message(handle))
             .await
-            .map_err(|_| Error::ClientConnectionError("client actor was dropped".to_string()))?;
+            .map_err(|_| {
+                Error::ClientConnectionError("client actor was dropped".to_string())
+            })?;
 
-        let data = rx.await
-            .map_err(|_| Error::ClientConnectionError("system failed to receive response from client".to_string()))?;
+        let data = rx.await.map_err(|_| {
+            Error::ClientConnectionError(
+                "system failed to receive response from client".to_string(),
+            )
+        })?;
 
         let t = bincode::deserialize_from(Cursor::new(data))?;
 
@@ -91,22 +94,21 @@ impl Client {
     }
 
     pub(crate) async fn wake(&self) -> Result<()> {
-        self.sender.send(EventOp::Retry)
-            .await
-            .map_err(|_| Error::ClientConnectionError("client actor was dropped".to_string()))?;
+        self.sender.send(EventOp::Retry).await.map_err(|_| {
+            Error::ClientConnectionError("client actor was dropped".to_string())
+        })?;
 
         Ok(())
     }
 
     pub(crate) async fn shutdown(&self) -> Result<()> {
-        self.sender.send(EventOp::Shutdown)
-            .await
-            .map_err(|_| Error::ClientConnectionError("client actor was dropped".to_string()))?;
+        self.sender.send(EventOp::Shutdown).await.map_err(|_| {
+            Error::ClientConnectionError("client actor was dropped".to_string())
+        })?;
 
         Ok(())
     }
 }
-
 
 /// Creates a new client connection.
 ///
@@ -124,7 +126,7 @@ pub(crate) async fn create_client(
             let cert = read_cert(cert).await?;
             get_secure_client_config(cert)?
         },
-        None => get_insecure_client_config()
+        None => get_insecure_client_config(),
     };
 
     let client_address = SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 0);
@@ -133,18 +135,10 @@ pub(crate) async fn create_client(
 
     let (tx, rx) = mpsc::channel(5);
 
-    tokio::spawn(run_client(
-        connect,
-        server_name,
-        endpoint,
-        rx,
-    ));
+    tokio::spawn(run_client(connect, server_name, endpoint, rx));
 
-    Ok(Client {
-        sender: tx,
-    })
+    Ok(Client { sender: tx })
 }
-
 
 async fn run_client(
     connect_address: SocketAddr,
@@ -155,10 +149,17 @@ async fn run_client(
     let server_name = server_name.unwrap_or_else(|| String::from("localhost"));
 
     loop {
-        if let Err(e) = handle_running_connection(connect_address, &server_name, &endpoint, &mut events).await {
+        if let Err(e) = handle_running_connection(
+            connect_address,
+            &server_name,
+            &endpoint,
+            &mut events,
+        )
+        .await
+        {
             warn!("node connection lost due to error {}", e);
         } else {
-            break
+            break;
         }
 
         info!("Waiting on node retry event or abort signal");
@@ -176,7 +177,7 @@ async fn run_client(
                     shutdown = false;
                     break;
                 },
-                EventOp::Message(_) => {}
+                EventOp::Message(_) => {},
             }
         }
 
@@ -188,8 +189,6 @@ async fn run_client(
     info!("Node connection has been aborted")
 }
 
-
-
 async fn handle_running_connection(
     connect_address: SocketAddr,
     server_name: &str,
@@ -200,37 +199,46 @@ async fn handle_running_connection(
 
     while connection_tries <= 4 {
         let conn = match endpoint.connect(connect_address, server_name) {
-            Ok(new) => match new.await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    warn!("failed to establish connection due to error {:?} retry_no={}", e, connection_tries);
-                    connection_tries += 1;
-                    tokio::time::sleep(Duration::from_secs(
-                    2i32.pow(connection_tries) as u64
-                    )).await;
-                    continue
-                },
+            Ok(new) => {
+                match new.await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        warn!("failed to establish connection due to error {:?} retry_no={}", e, connection_tries);
+                        connection_tries += 1;
+                        tokio::time::sleep(Duration::from_secs(
+                            2i32.pow(connection_tries) as u64,
+                        ))
+                        .await;
+                        continue;
+                    },
+                }
             },
             Err(e) => {
-                warn!("failed to establish connection due to error {:?} retry_no={}", e, connection_tries);
+                warn!(
+                    "failed to establish connection due to error {:?} retry_no={}",
+                    e, connection_tries
+                );
                 connection_tries += 1;
                 tokio::time::sleep(Duration::from_secs(
                     2i32.pow(connection_tries) as u64
-                )).await;
-                continue
-            }
+                ))
+                .await;
+                continue;
+            },
         };
 
         // Connection success
         connection_tries = 0;
 
         if let Err(e) = drive_connection(conn, events).await {
-            warn!("connection dropped due to error {}, retry_no={}", e, connection_tries);
+            warn!(
+                "connection dropped due to error {}, retry_no={}",
+                e, connection_tries
+            );
 
             connection_tries += 1;
-            tokio::time::sleep(Duration::from_secs(
-                2i32.pow(connection_tries) as u64
-            )).await;
+            tokio::time::sleep(Duration::from_secs(2i32.pow(connection_tries) as u64))
+                .await;
         } else {
             break;
         }
@@ -242,7 +250,6 @@ async fn handle_running_connection(
         Ok(())
     }
 }
-
 
 async fn drive_connection(
     conn: NewConnection,
@@ -261,7 +268,7 @@ async fn drive_connection(
         tokio::spawn(async move {
             if let Err(e) = tx.write_all(&event.data).await {
                 warn!("stream was interrupted while transferring data");
-                return Err(e.into())
+                return Err(e.into());
             };
 
             match rx.read_to_end(MAX_BUFFER_SIZE).await {
@@ -270,18 +277,17 @@ async fn drive_connection(
                 },
                 Err(ReadToEndError::TooLong) => {
                     warn!("Unusual peer activity: Sending responses large then max buffer size.");
-                    return Err(anyhow!("unusual peer activity detected"))
+                    return Err(anyhow!("unusual peer activity detected"));
                 },
                 Err(ReadToEndError::Read(e)) => {
                     warn!("client returned an error during read");
-                    return Err(e.into())
-                }
+                    return Err(e.into());
+                },
             }
 
             Ok::<_, anyhow::Error>(())
         });
     }
-
 
     Ok(())
 }

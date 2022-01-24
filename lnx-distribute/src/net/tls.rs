@@ -1,30 +1,24 @@
 use std::path::Path;
 use std::sync::Arc;
-use quinn::{ClientConfig, ServerConfig};
 
-use tokio::fs;
+use quinn::{ClientConfig, ServerConfig};
 use rustls::{Certificate, PrivateKey};
+use tokio::fs;
 
 use crate::{Error, Result};
 
-
 /// Reads a cert file and generates the rustls cert from the content.
 pub(crate) async fn read_cert(cert: &Path) -> Result<Certificate> {
-    let cert = fs::read(cert)
-        .await
-        .map_err(Error::TlsFileError)?;
+    let cert = fs::read(cert).await.map_err(Error::TlsFileError)?;
 
     let cert = Certificate(cert);
 
     Ok(cert)
 }
 
-
 /// Reads a key file and generates the rustls key from the content.
 pub(crate) async fn read_key(key: &Path) -> Result<PrivateKey> {
-    let key = fs::read(key)
-        .await
-        .map_err(Error::TlsFileError)?;
+    let key = fs::read(key).await.map_err(Error::TlsFileError)?;
 
     let key = PrivateKey(key);
 
@@ -43,16 +37,14 @@ pub(crate) fn get_insecure_client_config() -> ClientConfig {
     ClientConfig::new(Arc::new(crypto))
 }
 
-
 /// Produces a secure client that takes a cert and key.
 ///
 /// This is recommended for production use.
 pub(crate) fn get_secure_client_config(cert: Certificate) -> Result<ClientConfig> {
     let mut certs = rustls::RootCertStore::empty();
-    certs.add(&cert)
-        .map_err(|_| Error::TlsError(
-            rustls::Error::General("invalid cert provided".to_string())
-        ))?;
+    certs.add(&cert).map_err(|_| {
+        Error::TlsError(rustls::Error::General("invalid cert provided".to_string()))
+    })?;
 
     let crypto = rustls::ClientConfig::builder()
         .with_safe_defaults()
@@ -61,8 +53,6 @@ pub(crate) fn get_secure_client_config(cert: Certificate) -> Result<ClientConfig
 
     Ok(ClientConfig::new(Arc::new(crypto)))
 }
-
-
 
 /// Produces a insecure server that uses a self-signed certificate.
 ///
@@ -76,18 +66,19 @@ pub(crate) fn get_insecure_server_config() -> Result<ServerConfig> {
     let cert_chain = vec![rustls::Certificate(cert_der)];
 
     let mut server_config = ServerConfig::with_single_cert(cert_chain, key)?;
-    Arc::get_mut(&mut server_config.transport)
-        .unwrap();
+    Arc::get_mut(&mut server_config.transport).unwrap();
 
     Ok(server_config)
 }
-
 
 /// Produces a secure server that uses a given (cert, key) pair.
 ///
 /// This is designed to work only with the insecure client that doesn't
 /// verify the cert. Hence why we generate a completely irrelevant cert.
-pub(crate) fn get_secure_server_config(cert: Certificate, key: PrivateKey) -> Result<ServerConfig> {
+pub(crate) fn get_secure_server_config(
+    cert: Certificate,
+    key: PrivateKey,
+) -> Result<ServerConfig> {
     let mut server_config = ServerConfig::with_single_cert(vec![cert], key)?;
     Arc::get_mut(&mut server_config.transport)
         .unwrap()
@@ -95,7 +86,6 @@ pub(crate) fn get_secure_server_config(cert: Certificate, key: PrivateKey) -> Re
 
     Ok(server_config)
 }
-
 
 struct SkipServerVerification;
 
