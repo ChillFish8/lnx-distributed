@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "lnx-server",
+    "lnx-http",
+    "lnx-distribute",
+]
