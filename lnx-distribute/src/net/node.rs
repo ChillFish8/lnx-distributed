@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
@@ -13,7 +14,7 @@ use tokio::sync::RwLock;
 
 use super::connection::{create_server, Client};
 use crate::net::connection::create_client;
-use crate::{Error, Result};
+use crate::Result;
 
 pub type NodeId = u64;
 
@@ -98,7 +99,7 @@ async fn handle_stream<Req, E, F>(
     rx: RecvStream,
 ) where
     Req: DeserializeOwned + Sized + Send + 'static,
-    E: std::error::Error + Send + Sync + 'static,
+    E: Display + Send + Sync + 'static,
     F: Future<Output = core::result::Result<Vec<u8>, E>> + Sync + Send + 'static,
 {
     let data = match rx.read_to_end(MAX_SERVER_READ_SIZE).await {
@@ -162,7 +163,7 @@ impl NodeServer {
     pub async fn serve<Req, F, E>(&mut self, callback: fn(Req) -> F) -> Result<()>
     where
         Req: DeserializeOwned + Sized + Send + 'static,
-        E: std::error::Error + Send + Sync + 'static,
+        E: Display + Send + Sync + 'static,
         F: Future<Output = core::result::Result<Vec<u8>, E>> + Sync + Send + 'static,
     {
         while let Some(next) = self.incoming.next().await {
@@ -250,7 +251,7 @@ where
 
     pub async fn serve<E, F>(&mut self, callback: fn(Req) -> F) -> Result<()>
     where
-        E: std::error::Error + Send + Sync + 'static,
+        E: Display + Send + Sync + 'static,
         F: Future<Output = core::result::Result<Vec<u8>, E>> + Sync + Send + 'static,
     {
         self.server.serve(callback).await
