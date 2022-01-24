@@ -90,9 +90,7 @@ where
     F: Future<Output = core::result::Result<(), E>> + Sync + Send + 'static
 {
     /// A set of peer nodes to communicate with.
-    connected_peers: HashMap<NodeId, Peer>,
-
-    ///
+    peers: HashMap<NodeId, Peer>,
 
     /// The node's server endpoint for peers to connect to.
     server: NodeServer<R, F, E>,
@@ -108,14 +106,14 @@ where
     ///
     /// This creates a connection with all peers and starts it's own server to receive events.
     pub async fn create_node(kind: SocketKind, callback: fn(R) -> F) -> Result<Self> {
-        let (incoming, connected_peers) = get_server_and_peers(kind).await?;
+        let (incoming, peers) = get_server_and_peers(kind).await?;
         let server = NodeServer {
             incoming,
             callback,
         };
 
         Ok(Self {
-            connected_peers,
+            peers,
             server,
         })
     }
@@ -127,7 +125,7 @@ where
     /// If the node doesn't exist an `Err(WiskeyError::UnknownNode(node))`
     /// is returned.
     pub async fn send_to_node(&self, node: NodeId, req: &R) -> Result<()> {
-        match self.connected_peers.get(&node) {
+        match self.peers.get(&node) {
             Some(peer) => peer.client.send(req).await,
             None => Err(RaftError::UnknownNode(node)),
         }
