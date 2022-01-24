@@ -136,17 +136,14 @@ async fn handle_stream<Req, E, F>(
         },
     };
 
-    match tx.write_all(&data).await {
-        Err(e) => {
-            warn!(
-                "During handling for peer ({}) the node server failed to \
-                write all data to peer stream {}",
-                remote,
-                anyhow::Error::from(e)
-            );
-            return;
-        },
-        _ => {},
+    if let Err(e) = tx.write_all(&data).await {
+        warn!(
+            "During handling for peer ({}) the node server failed to \
+            write all data to peer stream {}",
+            remote,
+            anyhow::Error::from(e)
+        );
+        return;
     };
 }
 
