@@ -5,4 +5,4 @@ mod error;
 #[macro_use]
 extern crate tracing;
 
-pub use error::{RaftError, Result};
+pub use error::{Error, Result};

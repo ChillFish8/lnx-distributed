@@ -1,16 +1,23 @@
 use std::future::Future;
+use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use hashbrown::HashMap;
-use quinn::Incoming;
+use quinn::{Incoming, ReadToEndError, RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use tokio::sync::RwLock;
+use futures_util::StreamExt;
 
 use super::connection::{Client, create_server};
-use crate::{RaftError, Result};
+use crate::{Error, Result};
 use crate::net::connection::create_client;
 
 pub type NodeId = u64;
+
+const MAX_SERVER_READ_SIZE: usize = 512 << 20;  // ~500MB
 
 #[derive(Debug, Deserialize)]
 pub struct TlsAddress {
@@ -52,7 +59,10 @@ pub enum SocketKind {
 
 
 /// A remote peer that the node can interact with.
-pub struct Peer {
+pub struct Peer<Req>
+    where
+        Req: DeserializeOwned + Serialize + Sized,
+{
     /// The socket address of the peer.
     address: SocketAddr,
 
@@ -61,79 +71,203 @@ pub struct Peer {
     /// This is a write-only stream. A node is not supposed to wait
     /// or care about it's peers.
     client: Client,
+
+    _request: PhantomData<Req>,
+}
+
+impl<Req> Peer<Req>
+    where
+        Req: DeserializeOwned + Serialize + Sized,
+{
+    fn new(address: SocketAddr, client: Client) -> Self {
+        Self {
+            address,
+            client,
+            _request: PhantomData::default(),
+        }
+    }
+
+    /// Send a request to the peer.
+    pub async fn send<Resp: DeserializeOwned + Sized>(&self, req: &Req) -> Result<Resp> {
+        self.client.send(req).await
+    }
 }
 
 
-pub struct NodeServer<R, F, E>
-where
-    R: Deserialize<'static> + Sized,
-    E: std::error::Error + Send + Sync,
-    F: Future<Output = core::result::Result<(), E>>
+async fn handle_stream<Req, E, F>(
+    remote: SocketAddr,
+    callback: fn(Req) -> F,
+    mut tx: SendStream,
+    rx: RecvStream,
+)
+    where
+        Req: DeserializeOwned + Sized + Send + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+        F: Future<Output=core::result::Result<Vec<u8>, E>> + Sync + Send + 'static
 {
+    let data = match rx.read_to_end(MAX_SERVER_READ_SIZE).await {
+        Ok(buff) => buff,
+        Err(ReadToEndError::TooLong) => {
+            warn!("Peer ({}) attempted to send a payload greater than the max read limit!", remote);
+            return;
+        },
+        Err(ReadToEndError::Read(e)) => {
+            warn!("Unable to read data from peer ({}) due to error {}", remote, anyhow::Error::from(e));
+            return;
+        }
+    };
+
+    let req: Req = match bincode::deserialize(&data) {
+        Ok(req) => req,
+        Err(_) => {
+            warn!("Peer ({}) sent a invalid request payload", remote);
+            return;
+        }
+    };
+
+    let data = match callback(req).await {
+        Ok(data) => data,
+        Err(e) => {
+            warn!("During handling for peer ({}) the node server callback encountered an error {}", remote, e);
+            return;
+        },
+    };
+
+    match tx.write_all(&data).await {
+        Err(e) => {
+            warn!(
+                "During handling for peer ({}) the node server failed to \
+                write all data to peer stream {}",
+                remote,
+                anyhow::Error::from(e)
+            );
+            return;
+        }
+        _ => {}
+    };
+}
+
+
+pub struct NodeServer {
     /// The server endpoint connection
     incoming: Incoming,
-
-    /// The callback
-    callback: fn(R) -> F,
 }
 
+impl From<Incoming> for NodeServer {
+    fn from(v: Incoming) -> Self {
+        Self {
+            incoming: v,
+        }
+    }
+}
+
+impl NodeServer {
+    pub async fn serve<Req, F, E>(&mut self, callback: fn(Req) -> F) -> Result<()>
+        where
+            Req: DeserializeOwned + Sized + Send + 'static,
+            E: std::error::Error + Send + Sync + 'static,
+            F: Future<Output=core::result::Result<Vec<u8>, E>> + Sync + Send + 'static
+    {
+        while let Some(next) = self.incoming.next().await {
+            let conn = next.await?;
+            tokio::spawn(async move {
+                let mut streams = conn.bi_streams;
+                let remote = conn.connection.remote_address();
+
+                while let Some(Ok((tx, rx))) = streams.next().await {
+                    tokio::spawn(handle_stream(remote, callback, tx, rx));
+                }
+            });
+        }
+
+        Ok(())
+    }
+}
+
+
+pub struct PeersHandle<Req>
+    where
+        Req: DeserializeOwned + Serialize + Sized + Send + 'static,
+{
+    /// A set of peer nodes to communicate with.
+    peers: Arc<RwLock<HashMap<NodeId, Peer<Req>>>>,
+}
+
+impl<Req> Clone for PeersHandle<Req>
+    where
+        Req: DeserializeOwned + Serialize + Sized + Send + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            peers: self.peers.clone(),
+        }
+    }
+}
+
+impl<Req> PeersHandle<Req>
+    where
+        Req: DeserializeOwned + Serialize + Sized + Send + 'static,
+{
+    pub(crate) fn new(base: HashMap<NodeId, Peer<Req>>) -> Self {
+        Self {
+            peers: Arc::new(RwLock::new(base)),
+        }
+    }
+}
 
 /// A RPC node.
 ///
 /// A node maintains a write-only connection to it's peers
 /// with it's peers intern forming a connection with the node's given server
 /// address.
-pub struct Node<R, F, E>
-where
-    R: Deserialize<'static> + Serialize + Sized,
-    E: std::error::Error + Send + Sync,
-    F: Future<Output = core::result::Result<(), E>> + Sync + Send + 'static
+pub struct Node<Req>
+    where
+        Req: DeserializeOwned + Serialize + Sized + Send + 'static,
 {
-    /// A set of peer nodes to communicate with.
-    peers: HashMap<NodeId, Peer>,
+    peers: PeersHandle<Req>,
 
     /// The node's server endpoint for peers to connect to.
-    server: NodeServer<R, F, E>,
+    server: NodeServer,
 }
 
-impl<R, F, E> Node<R, F, E>
-where
-    R: Deserialize<'static> + Serialize + Sized,
-    E: std::error::Error + Send + Sync,
-    F: Future<Output = core::result::Result<(), E>> + Sync + Send + 'static
+impl<Req> Node<Req>
+    where
+        Req: DeserializeOwned + Serialize + Sized + Send + 'static,
 {
     /// Creates a new node.
     ///
     /// This creates a connection with all peers and starts it's own server to receive events.
-    pub async fn create_node(kind: SocketKind, callback: fn(R) -> F) -> Result<Self> {
+    pub async fn create_node(kind: SocketKind) -> Result<Self> {
         let (incoming, peers) = get_server_and_peers(kind).await?;
-        let server = NodeServer {
-            incoming,
-            callback,
-        };
+        let server = NodeServer::from(incoming);
 
         Ok(Self {
-            peers,
+            peers: PeersHandle::new(peers),
             server,
         })
     }
 
+    /// Creates a new peer handle to communicate with peers.
+    pub fn handle(&self) -> PeersHandle<Req> {
+        self.peers.clone()
+    }
 
-
-    /// Send a request to a given peer node.
-    ///
-    /// If the node doesn't exist an `Err(WiskeyError::UnknownNode(node))`
-    /// is returned.
-    pub async fn send_to_node(&self, node: NodeId, req: &R) -> Result<()> {
-        match self.peers.get(&node) {
-            Some(peer) => peer.client.send(req).await,
-            None => Err(RaftError::UnknownNode(node)),
-        }
+    pub async fn serve<E, F>(&mut self, callback: fn(Req) -> F) -> Result<()>
+        where
+            E: std::error::Error + Send + Sync + 'static,
+            F: Future<Output=core::result::Result<Vec<u8>, E>> + Sync + Send + 'static
+    {
+        self.server.serve(callback).await
     }
 }
 
 
-async fn get_server_and_peers(kind: SocketKind) -> Result<(Incoming, HashMap<NodeId, Peer>)> {
+async fn get_server_and_peers<Req>(
+    kind: SocketKind
+) -> Result<(Incoming, HashMap<NodeId, Peer<Req>>)>
+    where
+        Req: DeserializeOwned + Serialize + Sized + 'static,
+{
     match kind {
         SocketKind::Secure {
             bind_address,
@@ -154,10 +288,7 @@ async fn get_server_and_peers(kind: SocketKind) -> Result<(Incoming, HashMap<Nod
 
                 peer_map.insert(
                     node_id,
-                    Peer {
-                        address: peer.address,
-                        client
-                    }
+                    Peer::new(peer.address, client)
                 );
             }
 
@@ -175,10 +306,7 @@ async fn get_server_and_peers(kind: SocketKind) -> Result<(Incoming, HashMap<Nod
 
                 peer_map.insert(
                     node_id,
-                    Peer {
-                        address: peer,
-                        client
-                    }
+                    Peer::new(peer, client),
                 );
             }
 

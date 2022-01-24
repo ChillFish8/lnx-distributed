@@ -1,18 +1,16 @@
 use std::io::Cursor;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 use anyhow::anyhow;
 
 use tokio::sync::mpsc::{self, Sender, Receiver};
 use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
-use quinn::{Endpoint, NewConnection, Incoming, Connection};
+use quinn::{Endpoint, NewConnection, Incoming, ReadToEndError};
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 
-use crate::{Result, RaftError};
+use crate::{Result, Error};
 use super::tls::{
     get_insecure_client_config,
     get_secure_server_config,
@@ -23,7 +21,10 @@ use super::tls::{
 };
 
 
-const BUFFER_SIZE: usize = 256 << 10;
+/// The max response buffer size.
+///
+/// We dont really expect our peer responses to be any bigger than this.
+const MAX_BUFFER_SIZE: usize = 256 << 10;
 
 
 /// Creates a new server listener.
@@ -79,10 +80,10 @@ impl Client {
 
         self.sender.send(EventOp::Message(handle))
             .await
-            .map_err(|_| RaftError::ClientConnectionError("client actor was dropped".to_string()))?;
+            .map_err(|_| Error::ClientConnectionError("client actor was dropped".to_string()))?;
 
         let data = rx.await
-            .map_err(|_| RaftError::ClientConnectionError("system failed to receive response from client".to_string()))?;
+            .map_err(|_| Error::ClientConnectionError("system failed to receive response from client".to_string()))?;
 
         let t = bincode::deserialize_from(Cursor::new(data))?;
 
@@ -92,7 +93,7 @@ impl Client {
     pub(crate) async fn wake(&self) -> Result<()> {
         self.sender.send(EventOp::Retry)
             .await
-            .map_err(|_| RaftError::ClientConnectionError("client actor was dropped".to_string()))?;
+            .map_err(|_| Error::ClientConnectionError("client actor was dropped".to_string()))?;
 
         Ok(())
     }
@@ -100,7 +101,7 @@ impl Client {
     pub(crate) async fn shutdown(&self) -> Result<()> {
         self.sender.send(EventOp::Shutdown)
             .await
-            .map_err(|_| RaftError::ClientConnectionError("client actor was dropped".to_string()))?;
+            .map_err(|_| Error::ClientConnectionError("client actor was dropped".to_string()))?;
 
         Ok(())
     }
@@ -249,7 +250,6 @@ async fn drive_connection(
 ) -> anyhow::Result<()> {
     let conn = conn.connection;
 
-    let mut handles = vec![];
     while let Some(event_op) = events.recv().await {
         let event = match event_op {
             EventOp::Message(ev) => ev,
@@ -257,37 +257,31 @@ async fn drive_connection(
             EventOp::Shutdown => break,
         };
 
-        let (mut tx, mut rx) = conn.open_bi().await?;
-        let handle = tokio::spawn(async move {
+        let (mut tx, rx) = conn.open_bi().await?;
+        tokio::spawn(async move {
             if let Err(e) = tx.write_all(&event.data).await {
                 warn!("stream was interrupted while transferring data");
                 return Err(e.into())
             };
 
-            let mut total_buffer = Vec::new();
-            let mut buffer = [0u8; BUFFER_SIZE];
-            match rx.read(&mut buffer).await {
-                Ok(None) => {
-                    let _ = event.responder.send(total_buffer);
+            match rx.read_to_end(MAX_BUFFER_SIZE).await {
+                Ok(buff) => {
+                    let _ = event.responder.send(buff);
                 },
-                Ok(Some(n)) => {
-                    total_buffer.extend_from_slice(&buffer[..n]);
+                Err(ReadToEndError::TooLong) => {
+                    warn!("Unusual peer activity: Sending responses large then max buffer size.");
+                    return Err(anyhow!("unusual peer activity detected"))
                 },
-                Err(e) => {
+                Err(ReadToEndError::Read(e)) => {
                     warn!("client returned an error during read");
                     return Err(e.into())
                 }
-            };
+            }
 
             Ok::<_, anyhow::Error>(())
         });
-
-        handles.push(handle);
     }
 
-    for handle in handles {
-        let _ = handle.await;
-    }
 
     Ok(())
 }

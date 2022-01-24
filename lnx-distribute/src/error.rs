@@ -1,12 +1,11 @@
 use async_raft::NodeId;
 use quinn::{ApplicationClose, ConnectError, ConnectionClose, ConnectionError};
 
-pub type Result<T> = core::result::Result<T, RaftError>;
-
+pub type Result<T> = core::result::Result<T, Error>;
 
 
 #[derive(Debug, thiserror::Error)]
-pub enum RaftError {
+pub enum Error {
     #[error("failed to read TLS file due to error {0}")]
     TlsFileError(std::io::Error),
 
@@ -26,7 +25,7 @@ pub enum RaftError {
     UnknownNode(NodeId),
 }
 
-impl From<ConnectError> for RaftError {
+impl From<ConnectError> for Error {
     fn from(e: ConnectError) -> Self {
         let msg = match e {
             ConnectError::TooManyConnections => "too many connection already exist".to_string(),
@@ -41,7 +40,7 @@ impl From<ConnectError> for RaftError {
     }
 }
 
-impl From<ConnectionError> for RaftError {
+impl From<ConnectionError> for Error {
     fn from(e: ConnectionError) -> Self {
         let msg = match e {
             ConnectionError::VersionMismatch => "peer does not support any compatible versions".to_string(),

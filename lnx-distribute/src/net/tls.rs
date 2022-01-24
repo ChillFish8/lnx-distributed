@@ -5,14 +5,14 @@ use quinn::{ClientConfig, ServerConfig};
 use tokio::fs;
 use rustls::{Certificate, PrivateKey};
 
-use crate::{RaftError, Result};
+use crate::{Error, Result};
 
 
 /// Reads a cert file and generates the rustls cert from the content.
 pub(crate) async fn read_cert(cert: &Path) -> Result<Certificate> {
     let cert = fs::read(cert)
         .await
-        .map_err(RaftError::TlsFileError)?;
+        .map_err(Error::TlsFileError)?;
 
     let cert = Certificate(cert);
 
@@ -24,7 +24,7 @@ pub(crate) async fn read_cert(cert: &Path) -> Result<Certificate> {
 pub(crate) async fn read_key(key: &Path) -> Result<PrivateKey> {
     let key = fs::read(key)
         .await
-        .map_err(RaftError::TlsFileError)?;
+        .map_err(Error::TlsFileError)?;
 
     let key = PrivateKey(key);
 
@@ -50,7 +50,7 @@ pub(crate) fn get_insecure_client_config() -> ClientConfig {
 pub(crate) fn get_secure_client_config(cert: Certificate) -> Result<ClientConfig> {
     let mut certs = rustls::RootCertStore::empty();
     certs.add(&cert)
-        .map_err(|_| RaftError::TlsError(
+        .map_err(|_| Error::TlsError(
             rustls::Error::General("invalid cert provided".to_string())
         ))?;
 
