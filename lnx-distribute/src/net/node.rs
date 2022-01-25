@@ -386,20 +386,11 @@ where
         VH: Send + Sync + 'static + Fn(Req) -> VHF,
         CB: Send + Sync + 'static + Fn(Req) -> F,
         F: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
-        VHF: Future<Output = anyhow::Result<()>> + Sync + Send + 'static,
+        VHF: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
     {
-        let validate_handshake = Arc::new(validate_handshake);
-
         self.server
             .serve(
-                move |r| {
-                    let cb = validate_handshake.clone();
-                    async move {
-                        (cb.as_ref())(r).await?;
-
-                        Ok::<_, anyhow::Error>(Vec::new())
-                    }
-                },
+                validate_handshake,
                 callback,
             )
             .await

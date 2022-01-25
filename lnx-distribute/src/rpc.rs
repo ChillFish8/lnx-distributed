@@ -6,6 +6,11 @@ use crate::Result;
 #[derive(Serialize, Deserialize)]
 pub enum PeerRequest {}
 
+#[derive(Serialize, Deserialize)]
+pub struct HandShakeResponse {
+
+}
+
 pub struct RaftNetwork {
     peers: net::PeersHandle<PeerRequest>,
 }
@@ -23,7 +28,8 @@ impl RaftNetwork {
                     async move {
                         handle.retry_all_peers().await?;
 
-                        Ok(())
+                        let data = bincode::serialize(&HandShakeResponse{})?;
+                        Ok::<_, anyhow::Error>(data)
                     }
                 },
                 move |_v| async { Ok::<_, anyhow::Error>(Vec::new()) },
