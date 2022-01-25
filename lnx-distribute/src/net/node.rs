@@ -4,10 +4,11 @@ use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use anyhow::anyhow;
 
 use futures_util::StreamExt;
 use hashbrown::HashMap;
-use quinn::{Incoming, ReadToEndError, RecvStream, SendStream};
+use quinn::{Incoming, NewConnection, ReadToEndError, RecvStream, SendStream};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -19,6 +20,8 @@ use crate::Result;
 pub type NodeId = u64;
 
 const MAX_SERVER_READ_SIZE: usize = 512 << 20; // ~500MB
+const MAX_HANDSHAKE_SIZE: usize = 32 << 10; // ~32KB
+
 
 #[derive(Debug, Deserialize)]
 pub struct TlsAddress {
@@ -78,6 +81,7 @@ impl<Req> Peer<Req>
 where
     Req: DeserializeOwned + Serialize + Sized,
 {
+    /// Create a new peer from a given SocketAddress and client handle.
     fn new(address: SocketAddr, client: Client) -> Self {
         Self {
             address,
@@ -92,6 +96,47 @@ where
     }
 }
 
+
+#[instrument(name = "read-request", skip(rx))]
+async fn read_request<Req>(
+    max_size: usize,
+    rx: RecvStream,
+) -> anyhow::Result<Req>
+where
+    Req: DeserializeOwned + Sized + Send + 'static,
+{
+    let data = match rx.read_to_end(max_size).await {
+        Ok(buff) => buff,
+        Err(ReadToEndError::TooLong) => {
+            warn!("Peer attempted to send a payload greater than the max read limit!");
+            return Err(anyhow!("peer request too long"));
+        },
+        Err(ReadToEndError::Read(e)) => {
+            warn!(
+                "Unable to read data from peer due to error {}",
+                anyhow::Error::from(e)
+            );
+            return Err(anyhow!("peer request too long"));
+        },
+    };
+
+    let req: Req = match bincode::deserialize(&data) {
+        Ok(req) => req,
+        Err(_) => {
+            warn!("Peer sent a invalid request payload");
+            return Err(anyhow!("peer request invalid"));
+        },
+    };
+
+    Ok(req)
+}
+
+
+/// Handles a new Bi-directional stream.
+///
+/// This is unaware of it's parent connection and should treat each
+/// stream as if it was a separate connection.
+#[instrument(name = "peer-connection", skip(callback, tx, rx))]
 async fn handle_stream<Req, E, F>(
     remote: SocketAddr,
     callback: fn(Req) -> F,
@@ -102,31 +147,9 @@ async fn handle_stream<Req, E, F>(
     E: Display + Send + Sync + 'static,
     F: Future<Output = core::result::Result<Vec<u8>, E>> + Sync + Send + 'static,
 {
-    let data = match rx.read_to_end(MAX_SERVER_READ_SIZE).await {
-        Ok(buff) => buff,
-        Err(ReadToEndError::TooLong) => {
-            warn!(
-                "Peer ({}) attempted to send a payload greater than the max read limit!",
-                remote
-            );
-            return;
-        },
-        Err(ReadToEndError::Read(e)) => {
-            warn!(
-                "Unable to read data from peer ({}) due to error {}",
-                remote,
-                anyhow::Error::from(e)
-            );
-            return;
-        },
-    };
-
-    let req: Req = match bincode::deserialize(&data) {
-        Ok(req) => req,
-        Err(_) => {
-            warn!("Peer ({}) sent a invalid request payload", remote);
-            return;
-        },
+    let req = match read_request(MAX_SERVER_READ_SIZE, rx).await {
+        Ok(r) => r,
+        Err(_) => return,
     };
 
     let data = match callback(req).await {
@@ -144,10 +167,72 @@ async fn handle_stream<Req, E, F>(
             remote,
             anyhow::Error::from(e)
         );
-        return;
     };
 }
 
+
+async fn setup_handshake<Req, F>(
+    on_connection: fn(Req) -> F,
+    rx: RecvStream,
+    mut tx: SendStream,
+) -> anyhow::Result<()>
+where
+    Req: DeserializeOwned + Sized + Send + 'static,
+    F: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
+{
+    let req: Req = read_request(MAX_HANDSHAKE_SIZE, rx).await?;
+    let data = on_connection(req).await?;
+
+    tx.write_all(&data).await?;
+
+    Ok(())
+}
+
+
+#[instrument(
+    name = "peer-connections",
+    skip(conn, on_connection, callback),
+)]
+async fn handle_connection<Req, E, F, F2>(
+    conn: NewConnection,
+    remote: SocketAddr,
+    on_connection: fn(Req) -> F2,
+    callback: fn(Req) -> F
+)
+where
+    Req: DeserializeOwned + Sized + Send + 'static,
+    E: Display + Send + Sync + 'static,
+    F: Future<Output = core::result::Result<Vec<u8>, E>> + Sync + Send + 'static,
+    F2: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
+{
+    let mut streams = conn.bi_streams;
+
+    // TODO have first time connection handshake.
+
+    info!("New peer connected");
+    match streams.next().await {
+        Some(Ok((tx, rx))) => {
+            if let Err(e) = setup_handshake(on_connection, rx, tx).await {
+                warn!("Peer failed to upgrade handshake due to error {}", e);
+                return;
+            }
+        },
+        _ => {
+            info!("Peer errored while completing handshake");
+            return;
+        },
+    }
+    info!("Peer handshake complete!");
+
+    while let Some(Ok((tx, rx))) = streams.next().await {
+        tokio::spawn(handle_stream(remote, callback, tx, rx));
+    }
+}
+
+
+/// The RPC server that the node exposes in order for peers to communicate with it.
+///
+/// TODO automatically retry dead peer connections on a new connect...
 pub struct NodeServer {
     /// The server endpoint connection
     incoming: Incoming,
@@ -160,22 +245,21 @@ impl From<Incoming> for NodeServer {
 }
 
 impl NodeServer {
-    pub async fn serve<Req, F, E>(&mut self, callback: fn(Req) -> F) -> Result<()>
+    pub async fn serve<Req, F, E, F2>(
+        &mut self,
+        on_connection: fn(Req) -> F2,
+        callback: fn(Req) -> F
+    ) -> Result<()>
     where
         Req: DeserializeOwned + Sized + Send + 'static,
         E: Display + Send + Sync + 'static,
         F: Future<Output = core::result::Result<Vec<u8>, E>> + Sync + Send + 'static,
+        F2: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
     {
         while let Some(next) = self.incoming.next().await {
             let conn = next.await?;
-            tokio::spawn(async move {
-                let mut streams = conn.bi_streams;
-                let remote = conn.connection.remote_address();
-
-                while let Some(Ok((tx, rx))) = streams.next().await {
-                    tokio::spawn(handle_stream(remote, callback, tx, rx));
-                }
-            });
+            let remote = conn.connection.remote_address();
+            tokio::spawn(handle_connection(conn, remote, on_connection, callback));
         }
 
         Ok(())
@@ -254,7 +338,14 @@ where
         E: Display + Send + Sync + 'static,
         F: Future<Output = core::result::Result<Vec<u8>, E>> + Sync + Send + 'static,
     {
-        self.server.serve(callback).await
+        self.server.serve(
+            move |r| {
+                async {
+                    todo!()
+                }
+            },
+            callback
+        ).await
     }
 }
 
