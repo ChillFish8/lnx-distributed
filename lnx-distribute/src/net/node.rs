@@ -3,8 +3,8 @@ use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use anyhow::anyhow;
 
+use anyhow::anyhow;
 use futures_util::StreamExt;
 use hashbrown::HashMap;
 use quinn::{Incoming, NewConnection, ReadToEndError, RecvStream, SendStream};
@@ -20,7 +20,6 @@ pub type NodeId = u64;
 
 const MAX_SERVER_READ_SIZE: usize = 512 << 20; // ~500MB
 const MAX_HANDSHAKE_SIZE: usize = 32 << 10; // ~32KB
-
 
 #[derive(Debug, Deserialize)]
 pub struct TlsAddress {
@@ -107,14 +106,10 @@ where
     }
 }
 
-
 #[instrument(name = "read-request", skip(rx))]
-async fn read_request<Req>(
-    max_size: usize,
-    rx: RecvStream,
-) -> anyhow::Result<Req>
+async fn read_request<Req>(max_size: usize, rx: RecvStream) -> anyhow::Result<Req>
 where
-    Req: DeserializeOwned + Sized + Send + Sync  + 'static,
+    Req: DeserializeOwned + Sized + Send + Sync + 'static,
 {
     let data = match rx.read_to_end(max_size).await {
         Ok(buff) => buff,
@@ -142,7 +137,6 @@ where
     Ok(req)
 }
 
-
 /// Handles a new Bi-directional stream.
 ///
 /// This is unaware of it's parent connection and should treat each
@@ -155,7 +149,7 @@ async fn handle_stream<CB, Req, F>(
     rx: RecvStream,
 ) where
     CB: Send + Sync + 'static + Fn(Req) -> F,
-    Req: DeserializeOwned + Sized + Send + Sync  + 'static,
+    Req: DeserializeOwned + Sized + Send + Sync + 'static,
     F: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
 {
     let req = match read_request(MAX_SERVER_READ_SIZE, rx).await {
@@ -181,7 +175,6 @@ async fn handle_stream<CB, Req, F>(
     };
 }
 
-
 async fn setup_handshake<OC, Req, F>(
     on_connection: Arc<OC>,
     rx: RecvStream,
@@ -189,7 +182,7 @@ async fn setup_handshake<OC, Req, F>(
 ) -> anyhow::Result<()>
 where
     OC: Send + Sync + 'static + Fn(Req) -> F,
-    Req: DeserializeOwned + Sized + Send + Sync  + 'static,
+    Req: DeserializeOwned + Sized + Send + Sync + 'static,
     F: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
 {
     let req: Req = read_request(MAX_HANDSHAKE_SIZE, rx).await?;
@@ -200,21 +193,16 @@ where
     Ok(())
 }
 
-
-#[instrument(
-    name = "peer-connections",
-    skip(conn, on_connection, callback),
-)]
+#[instrument(name = "peer-connections", skip(conn, on_connection, callback))]
 async fn handle_connection<CB, OC, Req, F, F2>(
     conn: NewConnection,
     remote: SocketAddr,
     on_connection: Arc<OC>,
     callback: Arc<CB>,
-)
-where
+) where
     CB: Send + Sync + 'static + Fn(Req) -> F,
     OC: Send + Sync + 'static + Fn(Req) -> F2,
-    Req: DeserializeOwned + Sized + Send + Sync  + 'static,
+    Req: DeserializeOwned + Sized + Send + Sync + 'static,
     F: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
     F2: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
 {
@@ -240,7 +228,6 @@ where
     }
 }
 
-
 /// The RPC server that the node exposes in order for peers to communicate with it.
 pub struct NodeServer {
     /// The server endpoint connection
@@ -262,7 +249,7 @@ impl NodeServer {
     where
         CB: Send + Sync + 'static + Fn(Req) -> F,
         OC: Send + Sync + 'static + Fn(Req) -> F2,
-        Req: DeserializeOwned + Sized + Send + Sync  + 'static,
+        Req: DeserializeOwned + Sized + Send + Sync + 'static,
         F: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
         F2: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
     {
@@ -286,7 +273,7 @@ impl NodeServer {
 
 pub struct PeersHandle<Req>
 where
-    Req: DeserializeOwned + Serialize + Sized + Sync  + Send + 'static,
+    Req: DeserializeOwned + Serialize + Sized + Sync + Send + 'static,
 {
     /// A set of peer nodes to communicate with.
     peers: Arc<RwLock<HashMap<NodeId, Peer<Req>>>>,
@@ -294,7 +281,7 @@ where
 
 impl<Req> Clone for PeersHandle<Req>
 where
-    Req: DeserializeOwned + Serialize + Sized + Sync  + Send + 'static,
+    Req: DeserializeOwned + Serialize + Sized + Sync + Send + 'static,
 {
     fn clone(&self) -> Self {
         Self {
@@ -305,7 +292,7 @@ where
 
 impl<Req> PeersHandle<Req>
 where
-    Req: DeserializeOwned + Serialize + Sized + Sync  + Send + 'static,
+    Req: DeserializeOwned + Serialize + Sized + Sync + Send + 'static,
 {
     pub(crate) fn new(base: HashMap<NodeId, Peer<Req>>) -> Self {
         Self {
@@ -314,12 +301,14 @@ where
     }
 
     /// Sends a new request to the given peer and gets the response back.
-    pub(crate) async fn send_to_peer<Resp: DeserializeOwned + Sized>(&self, node_id: NodeId, req: &Req) -> Result<Resp> {
+    pub(crate) async fn send_to_peer<Resp: DeserializeOwned + Sized>(
+        &self,
+        node_id: NodeId,
+        req: &Req,
+    ) -> Result<Resp> {
         match self.peers.read().await.get(&node_id) {
-            Some(node) => {
-                node.send(req).await
-            },
-            None => Err(Error::UnknownNode(node_id))
+            Some(node) => node.send(req).await,
+            None => Err(Error::UnknownNode(node_id)),
         }
     }
 
@@ -336,7 +325,6 @@ where
         Ok(())
     }
 
-
     /// Shutdown all peers.
     ///
     /// This sends a shutdown signal to all peers.
@@ -350,7 +338,6 @@ where
 
         Ok(())
     }
-
 }
 
 /// A RPC node.
@@ -360,7 +347,7 @@ where
 /// address.
 pub struct Node<Req>
 where
-    Req: DeserializeOwned + Serialize + Sized + Send + Sync  + 'static,
+    Req: DeserializeOwned + Serialize + Sized + Send + Sync + 'static,
 {
     peers: PeersHandle<Req>,
 
@@ -399,21 +386,23 @@ where
         VH: Send + Sync + 'static + Fn(Req) -> VHF,
         CB: Send + Sync + 'static + Fn(Req) -> F,
         F: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
-        VHF: Future<Output =  anyhow::Result<()>> + Sync + Send + 'static,
+        VHF: Future<Output = anyhow::Result<()>> + Sync + Send + 'static,
     {
         let validate_handshake = Arc::new(validate_handshake);
 
-        self.server.serve(
-            move |r| {
-                let cb = validate_handshake.clone();
-                async move {
-                    (cb.as_ref())(r).await?;
+        self.server
+            .serve(
+                move |r| {
+                    let cb = validate_handshake.clone();
+                    async move {
+                        (cb.as_ref())(r).await?;
 
-                    Ok::<_, anyhow::Error>(Vec::new())
-                }
-            },
-            callback
-        ).await
+                        Ok::<_, anyhow::Error>(Vec::new())
+                    }
+                },
+                callback,
+            )
+            .await
     }
 }
 

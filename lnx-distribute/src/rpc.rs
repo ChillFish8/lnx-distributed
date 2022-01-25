@@ -26,9 +26,8 @@ impl RaftNetwork {
                         Ok(())
                     }
                 },
-                move |_v| async {
-                    Ok::<_, anyhow::Error>(Vec::new())
-                })
+                move |_v| async { Ok::<_, anyhow::Error>(Vec::new()) },
+            )
             .await?;
 
         Ok(Self { peers: handle })
