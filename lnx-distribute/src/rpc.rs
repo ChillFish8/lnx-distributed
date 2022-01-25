@@ -18,7 +18,7 @@ impl RaftNetwork {
 
         nodes
             .serve(
-                move |r| {
+                move |_r| {
                     let handle = waker_handle.clone();
                     async move {
                         handle.retry_all_peers().await?;
@@ -26,7 +26,7 @@ impl RaftNetwork {
                         Ok(())
                     }
                 },
-                move |v| async {
+                move |_v| async {
                     Ok::<_, anyhow::Error>(Vec::new())
                 })
             .await?;
