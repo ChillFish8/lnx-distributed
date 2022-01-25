@@ -2,12 +2,14 @@ mod connection;
 mod node;
 mod tls;
 
+pub use node::{
+    SocketKind,
+    TlsAddress,
+    NodeId,
+};
 pub(crate) use node::{
     Node,
-    NodeId,
     NodeServer,
     Peer,
     PeersHandle,
-    SocketKind,
-    TlsAddress,
 };

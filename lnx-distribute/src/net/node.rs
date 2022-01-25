@@ -3,10 +3,10 @@ use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::collections::HashMap;
 
 use anyhow::anyhow;
 use futures_util::StreamExt;
-use hashbrown::HashMap;
 use quinn::{Incoming, NewConnection, ReadToEndError, RecvStream, SendStream};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -45,12 +45,14 @@ pub struct TlsAddress {
 pub enum SocketKind {
     /// A insecure socket configuration and peers.
     Insecure {
+        node_id: NodeId,
         bind_address: SocketAddr,
         peers: HashMap<NodeId, SocketAddr>,
     },
 
     /// A secure socket configuration and peers.
     Secure {
+        node_id: NodeId,
         bind_address: SocketAddr,
         cert_file: PathBuf,
         key_file: PathBuf,
@@ -409,6 +411,7 @@ where
             cert_file,
             key_file,
             peers,
+            ..
         } => {
             let tls = Some((cert_file.as_path(), key_file.as_path()));
             let server = create_server(bind_address, tls).await?;
@@ -430,6 +433,7 @@ where
         SocketKind::Insecure {
             bind_address,
             peers,
+            ..
         } => {
             let server = create_server(bind_address, None).await?;
 

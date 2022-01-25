@@ -16,7 +16,7 @@ pub struct RaftNetwork {
 }
 
 impl RaftNetwork {
-    async fn connect(config: net::SocketKind) -> Result<Self> {
+    pub async fn connect(config: net::SocketKind) -> Result<Self> {
         let mut nodes = net::Node::create_node(config).await?;
         let waker_handle = nodes.handle();
         let handle = nodes.handle();

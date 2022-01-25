@@ -1,8 +1,9 @@
 mod error;
 mod net;
-mod rpc;
+pub mod rpc;
 
 #[macro_use]
 extern crate tracing;
 
+pub use net::{NodeId, SocketKind, TlsAddress};
 pub use error::{Error, Result};
