@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 
 use super::connection::{create_server, Client};
 use crate::net::connection::create_client;
-use crate::Result;
+use crate::{Error, Result};
 
 pub type NodeId = u64;
 
@@ -94,6 +94,18 @@ where
     pub async fn send<Resp: DeserializeOwned + Sized>(&self, req: &Req) -> Result<Resp> {
         self.client.send(req).await
     }
+
+    /// Re-attempts to connect to the peer if it's stagnated.
+    ///
+    /// This is a no-op if it's already running.
+    pub async fn wake(&self) -> Result<()> {
+        self.client.wake().await
+    }
+
+    /// Shutdown the node.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.client.shutdown().await
+    }
 }
 
 
@@ -137,16 +149,15 @@ where
 /// This is unaware of it's parent connection and should treat each
 /// stream as if it was a separate connection.
 #[instrument(name = "peer-connection", skip(callback, tx, rx))]
-async fn handle_stream<CB, Req, E, F>(
+async fn handle_stream<CB, Req, F>(
     remote: SocketAddr,
     callback: Arc<CB>,
     mut tx: SendStream,
     rx: RecvStream,
 ) where
-    CB: Fn(Req) -> F,
+    CB: Send + Sync + 'static + Fn(Req) -> F,
     Req: DeserializeOwned + Sized + Send + Sync  + 'static,
-    E: Display + Send + Sync + 'static,
-    F: Future<Output = core::result::Result<Vec<u8>, E>> + Sync + Send + 'static,
+    F: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
 {
     let req = match read_request(MAX_SERVER_READ_SIZE, rx).await {
         Ok(r) => r,
@@ -195,18 +206,17 @@ where
     name = "peer-connections",
     skip(conn, on_connection, callback),
 )]
-async fn handle_connection<OC, CB, Req, E, F, F2>(
+async fn handle_connection<CB, OC, Req, F, F2>(
     conn: NewConnection,
     remote: SocketAddr,
     on_connection: Arc<OC>,
     callback: Arc<CB>,
 )
 where
-    OC: Send + Sync + 'static + Fn(Req) -> F2,
     CB: Send + Sync + 'static + Fn(Req) -> F,
+    OC: Send + Sync + 'static + Fn(Req) -> F2,
     Req: DeserializeOwned + Sized + Send + Sync  + 'static,
-    E: Display + Send + Sync + 'static,
-    F: Future<Output = core::result::Result<Vec<u8>, E>> + Sync + Send + 'static,
+    F: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
     F2: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
 {
     let mut streams = conn.bi_streams;
@@ -245,17 +255,16 @@ impl From<Incoming> for NodeServer {
 }
 
 impl NodeServer {
-    pub async fn serve<OC, CB, Req, F, E, F2>(
+    pub async fn serve<CB, OC, Req, F, F2>(
         &mut self,
         on_connection: OC,
         callback: CB,
     ) -> Result<()>
     where
-        OC: Send + Sync + 'static + Fn(Req) -> F2,
         CB: Send + Sync + 'static + Fn(Req) -> F,
+        OC: Send + Sync + 'static + Fn(Req) -> F2,
         Req: DeserializeOwned + Sized + Send + Sync  + 'static,
-        E: Display + Send + Sync + 'static,
-        F: Future<Output = core::result::Result<Vec<u8>, E>> + Sync + Send + 'static,
+        F: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
         F2: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
     {
         let on_connection = Arc::new(on_connection);
@@ -304,6 +313,45 @@ where
             peers: Arc::new(RwLock::new(base)),
         }
     }
+
+    /// Sends a new request to the given peer and gets the response back.
+    pub(crate) async fn send_to_peer<Resp: DeserializeOwned + Sized>(&self, node_id: NodeId, req: &Req) -> Result<Resp> {
+        match self.peers.read().await.get(&node_id) {
+            Some(node) => {
+                node.send(req).await
+            },
+            None => Err(Error::UnknownNode(node_id))
+        }
+    }
+
+    /// Sends a wakeup call to all peers.
+    ///
+    /// Any peers which have failed connections will attempt to reconnect.
+    pub(crate) async fn retry_all_peers(&self) -> Result<()> {
+        let lock = self.peers.read().await;
+
+        for peer in lock.values() {
+            peer.wake().await?;
+        }
+
+        Ok(())
+    }
+
+
+    /// Shutdown all peers.
+    ///
+    /// This sends a shutdown signal to all peers.
+    /// Peer actors will finish handling requests before shutting down.
+    pub(crate) async fn shutdown_all_peers(&self) -> Result<()> {
+        let lock = self.peers.read().await;
+
+        for peer in lock.values() {
+            peer.shutdown().await?;
+        }
+
+        Ok(())
+    }
+
 }
 
 /// A RPC node.
@@ -343,16 +391,16 @@ where
         self.peers.clone()
     }
 
-    pub async fn serve<CB, VH, E, F>(
+    pub async fn serve<CB, VH, F, VHF>(
         &mut self,
         validate_handshake: VH,
         callback: CB,
     ) -> Result<()>
     where
-        VH: Send + Sync + 'static + Fn(Req) -> core::result::Result<(), E>,
+        VH: Send + Sync + 'static + Fn(Req) -> VHF,
         CB: Send + Sync + 'static + Fn(Req) -> F,
-        E: Display + Send + Sync + 'static,
-        F: Future<Output = core::result::Result<Vec<u8>, E>> + Sync + Send + 'static,
+        F: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
+        VHF: Future<Output =  anyhow::Result<()>> + Sync + Send + 'static,
     {
         let validate_handshake = Arc::new(validate_handshake);
 
@@ -360,10 +408,9 @@ where
             move |r| {
                 let cb = validate_handshake.clone();
                 async move {
-                    (cb.as_ref())(r)
-                        .map_err(|e| anyhow::Error::msg(e.to_string()))?;
+                    (cb.as_ref())(r).await?;
 
-                    Ok(Vec::new())
+                    Ok::<_, anyhow::Error>(Vec::new())
                 }
             },
             callback

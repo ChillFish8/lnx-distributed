@@ -13,12 +13,18 @@ pub struct RaftNetwork {
 impl RaftNetwork {
     async fn connect(config: net::SocketKind) -> Result<Self> {
         let mut nodes = net::Node::create_node(config).await?;
+        let waker_handle = nodes.handle();
         let handle = nodes.handle();
 
         nodes
             .serve(
                 move |r| {
-                    Ok(())
+                    let handle = waker_handle.clone();
+                    async move {
+                        handle.retry_all_peers().await?;
+
+                        Ok(())
+                    }
                 },
                 move |v| async {
                     Ok::<_, anyhow::Error>(Vec::new())
