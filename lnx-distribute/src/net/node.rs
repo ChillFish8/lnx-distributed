@@ -63,7 +63,7 @@ pub enum SocketKind {
 /// A remote peer that the node can interact with.
 pub struct Peer<Req>
 where
-    Req: DeserializeOwned + Serialize + Sized,
+    Req: DeserializeOwned + Serialize + Sized + Sync + Send + 'static,
 {
     /// The socket address of the peer.
     address: SocketAddr,
@@ -79,7 +79,7 @@ where
 
 impl<Req> Peer<Req>
 where
-    Req: DeserializeOwned + Serialize + Sized,
+    Req: DeserializeOwned + Serialize + Sized + Sync + Send + 'static,
 {
     /// Create a new peer from a given SocketAddress and client handle.
     fn new(address: SocketAddr, client: Client) -> Self {
@@ -103,7 +103,7 @@ async fn read_request<Req>(
     rx: RecvStream,
 ) -> anyhow::Result<Req>
 where
-    Req: DeserializeOwned + Sized + Send + 'static,
+    Req: DeserializeOwned + Sized + Send + Sync  + 'static,
 {
     let data = match rx.read_to_end(max_size).await {
         Ok(buff) => buff,
@@ -137,13 +137,14 @@ where
 /// This is unaware of it's parent connection and should treat each
 /// stream as if it was a separate connection.
 #[instrument(name = "peer-connection", skip(callback, tx, rx))]
-async fn handle_stream<Req, E, F>(
+async fn handle_stream<CB, Req, E, F>(
     remote: SocketAddr,
-    callback: fn(Req) -> F,
+    callback: Arc<CB>,
     mut tx: SendStream,
     rx: RecvStream,
 ) where
-    Req: DeserializeOwned + Sized + Send + 'static,
+    CB: Fn(Req) -> F,
+    Req: DeserializeOwned + Sized + Send + Sync  + 'static,
     E: Display + Send + Sync + 'static,
     F: Future<Output = core::result::Result<Vec<u8>, E>> + Sync + Send + 'static,
 {
@@ -152,7 +153,7 @@ async fn handle_stream<Req, E, F>(
         Err(_) => return,
     };
 
-    let data = match callback(req).await {
+    let data = match (callback.as_ref())(req).await {
         Ok(data) => data,
         Err(e) => {
             warn!("During handling for peer ({}) the node server callback encountered an error {}", remote, e);
@@ -171,17 +172,18 @@ async fn handle_stream<Req, E, F>(
 }
 
 
-async fn setup_handshake<Req, F>(
-    on_connection: fn(Req) -> F,
+async fn setup_handshake<OC, Req, F>(
+    on_connection: Arc<OC>,
     rx: RecvStream,
     mut tx: SendStream,
 ) -> anyhow::Result<()>
 where
-    Req: DeserializeOwned + Sized + Send + 'static,
+    OC: Send + Sync + 'static + Fn(Req) -> F,
+    Req: DeserializeOwned + Sized + Send + Sync  + 'static,
     F: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
 {
     let req: Req = read_request(MAX_HANDSHAKE_SIZE, rx).await?;
-    let data = on_connection(req).await?;
+    let data = (on_connection.as_ref())(req).await?;
 
     tx.write_all(&data).await?;
 
@@ -193,21 +195,21 @@ where
     name = "peer-connections",
     skip(conn, on_connection, callback),
 )]
-async fn handle_connection<Req, E, F, F2>(
+async fn handle_connection<OC, CB, Req, E, F, F2>(
     conn: NewConnection,
     remote: SocketAddr,
-    on_connection: fn(Req) -> F2,
-    callback: fn(Req) -> F
+    on_connection: Arc<OC>,
+    callback: Arc<CB>,
 )
 where
-    Req: DeserializeOwned + Sized + Send + 'static,
+    OC: Send + Sync + 'static + Fn(Req) -> F2,
+    CB: Send + Sync + 'static + Fn(Req) -> F,
+    Req: DeserializeOwned + Sized + Send + Sync  + 'static,
     E: Display + Send + Sync + 'static,
     F: Future<Output = core::result::Result<Vec<u8>, E>> + Sync + Send + 'static,
     F2: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
 {
     let mut streams = conn.bi_streams;
-
-    // TODO have first time connection handshake.
 
     info!("New peer connected");
     match streams.next().await {
@@ -225,14 +227,12 @@ where
     info!("Peer handshake complete!");
 
     while let Some(Ok((tx, rx))) = streams.next().await {
-        tokio::spawn(handle_stream(remote, callback, tx, rx));
+        tokio::spawn(handle_stream(remote, callback.clone(), tx, rx));
     }
 }
 
 
 /// The RPC server that the node exposes in order for peers to communicate with it.
-///
-/// TODO automatically retry dead peer connections on a new connect...
 pub struct NodeServer {
     /// The server endpoint connection
     incoming: Incoming,
@@ -245,21 +245,31 @@ impl From<Incoming> for NodeServer {
 }
 
 impl NodeServer {
-    pub async fn serve<Req, F, E, F2>(
+    pub async fn serve<OC, CB, Req, F, E, F2>(
         &mut self,
-        on_connection: fn(Req) -> F2,
-        callback: fn(Req) -> F
+        on_connection: OC,
+        callback: CB,
     ) -> Result<()>
     where
-        Req: DeserializeOwned + Sized + Send + 'static,
+        OC: Send + Sync + 'static + Fn(Req) -> F2,
+        CB: Send + Sync + 'static + Fn(Req) -> F,
+        Req: DeserializeOwned + Sized + Send + Sync  + 'static,
         E: Display + Send + Sync + 'static,
         F: Future<Output = core::result::Result<Vec<u8>, E>> + Sync + Send + 'static,
         F2: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
     {
+        let on_connection = Arc::new(on_connection);
+        let callback = Arc::new(callback);
+
         while let Some(next) = self.incoming.next().await {
             let conn = next.await?;
             let remote = conn.connection.remote_address();
-            tokio::spawn(handle_connection(conn, remote, on_connection, callback));
+            tokio::spawn(handle_connection(
+                conn,
+                remote,
+                on_connection.clone(),
+                callback.clone(),
+            ));
         }
 
         Ok(())
@@ -268,7 +278,7 @@ impl NodeServer {
 
 pub struct PeersHandle<Req>
 where
-    Req: DeserializeOwned + Serialize + Sized + Send + 'static,
+    Req: DeserializeOwned + Serialize + Sized + Sync  + Send + 'static,
 {
     /// A set of peer nodes to communicate with.
     peers: Arc<RwLock<HashMap<NodeId, Peer<Req>>>>,
@@ -276,7 +286,7 @@ where
 
 impl<Req> Clone for PeersHandle<Req>
 where
-    Req: DeserializeOwned + Serialize + Sized + Send + 'static,
+    Req: DeserializeOwned + Serialize + Sized + Sync  + Send + 'static,
 {
     fn clone(&self) -> Self {
         Self {
@@ -287,7 +297,7 @@ where
 
 impl<Req> PeersHandle<Req>
 where
-    Req: DeserializeOwned + Serialize + Sized + Send + 'static,
+    Req: DeserializeOwned + Serialize + Sized + Sync  + Send + 'static,
 {
     pub(crate) fn new(base: HashMap<NodeId, Peer<Req>>) -> Self {
         Self {
@@ -303,7 +313,7 @@ where
 /// address.
 pub struct Node<Req>
 where
-    Req: DeserializeOwned + Serialize + Sized + Send + 'static,
+    Req: DeserializeOwned + Serialize + Sized + Send + Sync  + 'static,
 {
     peers: PeersHandle<Req>,
 
@@ -313,7 +323,7 @@ where
 
 impl<Req> Node<Req>
 where
-    Req: DeserializeOwned + Serialize + Sized + Send + 'static,
+    Req: DeserializeOwned + Serialize + Sized + Send + Sync + 'static,
 {
     /// Creates a new node.
     ///
@@ -333,15 +343,27 @@ where
         self.peers.clone()
     }
 
-    pub async fn serve<E, F>(&mut self, callback: fn(Req) -> F) -> Result<()>
+    pub async fn serve<CB, VH, E, F>(
+        &mut self,
+        validate_handshake: VH,
+        callback: CB,
+    ) -> Result<()>
     where
+        VH: Send + Sync + 'static + Fn(Req) -> core::result::Result<(), E>,
+        CB: Send + Sync + 'static + Fn(Req) -> F,
         E: Display + Send + Sync + 'static,
         F: Future<Output = core::result::Result<Vec<u8>, E>> + Sync + Send + 'static,
     {
+        let validate_handshake = Arc::new(validate_handshake);
+
         self.server.serve(
             move |r| {
-                async {
-                    todo!()
+                let cb = validate_handshake.clone();
+                async move {
+                    (cb.as_ref())(r)
+                        .map_err(|e| anyhow::Error::msg(e.to_string()))?;
+
+                    Ok(Vec::new())
                 }
             },
             callback
@@ -353,7 +375,7 @@ async fn get_server_and_peers<Req>(
     kind: SocketKind,
 ) -> Result<(Incoming, HashMap<NodeId, Peer<Req>>)>
 where
-    Req: DeserializeOwned + Serialize + Sized + 'static,
+    Req: DeserializeOwned + Serialize + Sized + Sync + Send + 'static,
 {
     match kind {
         SocketKind::Secure {

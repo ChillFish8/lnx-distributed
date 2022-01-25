@@ -16,7 +16,13 @@ impl RaftNetwork {
         let handle = nodes.handle();
 
         nodes
-            .serve(move |v| async { Ok::<_, anyhow::Error>(Vec::new()) })
+            .serve(
+                move |r| {
+                    Ok(())
+                },
+                move |v| async {
+                    Ok::<_, anyhow::Error>(Vec::new())
+                })
             .await?;
 
         Ok(Self { peers: handle })
