@@ -24,6 +24,7 @@ impl RaftNetwork {
         nodes
             .serve(
                 move |_r| {
+                    info!("got connection!");
                     let handle = waker_handle.clone();
                     async move {
                         handle.retry_all_peers().await?;

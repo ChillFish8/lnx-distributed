@@ -12,17 +12,24 @@ use lnx_distribute::SocketKind;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let mut nodes = vec![];
-    nodes.push((1u64, "127.0.0.1:8001".parse::<SocketAddr>()?));
+    let node_id = std::env::var("NODE_ID")?.parse::<NodeId>()?;
+    let bind_addr = std::env::var("BIND_ADDR")?.parse::<SocketAddr>()?;
+
+    let remote_node_id = std::env::var("REMOTE_ID")?.parse::<NodeId>()?;
+    let remote = std::env::var("REMOTE_ADDR")?.parse::<SocketAddr>()?;
+
+    let nodes = vec![
+        (remote_node_id, remote)
+    ];
 
     let map: HashMap<NodeId, SocketAddr> = HashMap::from_iter(nodes.into_iter());
 
     let config = SocketKind::Insecure {
-        node_id: 0,
-        bind_address: "127.0.0.1:8000".parse()?,
+        node_id: node_id,
+        bind_address: bind_addr,
         peers: map,
     };
-    let node = rpc::RaftNetwork::connect(todo!());
+    let _node = rpc::RaftNetwork::connect(config).await?;
 
     Ok(())
 }

@@ -143,7 +143,7 @@ where
 ///
 /// This is unaware of it's parent connection and should treat each
 /// stream as if it was a separate connection.
-#[instrument(name = "peer-connection", skip(callback, tx, rx))]
+#[instrument(name = "peer-connection-stream", skip(callback, tx, rx))]
 async fn handle_stream<CB, Req, F>(
     remote: SocketAddr,
     callback: Arc<CB>,
@@ -195,7 +195,7 @@ where
     Ok(())
 }
 
-#[instrument(name = "peer-connections", skip(conn, on_connection, callback))]
+#[instrument(name = "peer-connection-server", skip(conn, on_connection, callback))]
 async fn handle_connection<CB, OC, Req, F, F2>(
     conn: NewConnection,
     remote: SocketAddr,
@@ -218,10 +218,14 @@ async fn handle_connection<CB, OC, Req, F, F2>(
                 return;
             }
         },
-        _ => {
-            info!("Peer errored while completing handshake");
+        Some(Err(e)) => {
+            info!("Peer errored while completing handshake {}", crate::Error::from(e));
             return;
         },
+        None =>{
+            info!("Peer closed");
+            return;
+        }
     }
     info!("Peer handshake complete!");
 

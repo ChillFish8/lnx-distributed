@@ -251,12 +251,18 @@ async fn handle_running_connection(
     }
 }
 
+#[instrument(
+    name = "peer-driver",
+    skip_all,
+    fields(remote = %conn.connection.remote_address())
+)]
 async fn drive_connection(
     conn: NewConnection,
     events: &mut Receiver<EventOp>,
 ) -> anyhow::Result<()> {
     let conn = conn.connection;
 
+    info!("Peer connection ready to receive events!");
     while let Some(event_op) = events.recv().await {
         let event = match event_op {
             EventOp::Message(ev) => ev,
