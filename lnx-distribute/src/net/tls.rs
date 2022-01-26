@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use quinn::{ClientConfig, ServerConfig};
+use quinn::{ClientConfig, IdleTimeout, ServerConfig, VarInt};
 use rustls::{Certificate, PrivateKey};
 use tokio::fs;
 
@@ -34,7 +34,13 @@ pub(crate) fn get_insecure_client_config() -> ClientConfig {
         .with_custom_certificate_verifier(SkipServerVerification::new())
         .with_no_client_auth();
 
-    ClientConfig::new(Arc::new(crypto))
+    let mut cfg = ClientConfig::new(Arc::new(crypto));
+
+    Arc::get_mut(&mut cfg.transport)
+        .unwrap()
+        .max_idle_timeout(Some(IdleTimeout::from(VarInt::from_u32(120_000))));
+
+    cfg
 }
 
 /// Produces a secure client that takes a cert and key.
@@ -51,7 +57,13 @@ pub(crate) fn get_secure_client_config(cert: Certificate) -> Result<ClientConfig
         .with_root_certificates(certs)
         .with_no_client_auth();
 
-    Ok(ClientConfig::new(Arc::new(crypto)))
+    let mut cfg = ClientConfig::new(Arc::new(crypto));
+
+    Arc::get_mut(&mut cfg.transport)
+        .unwrap()
+        .max_idle_timeout(Some(IdleTimeout::from(VarInt::from_u32(120_000))));
+
+    Ok(cfg)
 }
 
 /// Produces a insecure server that uses a self-signed certificate.
@@ -66,7 +78,10 @@ pub(crate) fn get_insecure_server_config() -> Result<ServerConfig> {
     let cert_chain = vec![rustls::Certificate(cert_der)];
 
     let mut server_config = ServerConfig::with_single_cert(cert_chain, key)?;
-    Arc::get_mut(&mut server_config.transport).unwrap();
+    Arc::get_mut(&mut server_config.transport)
+        .unwrap()
+        .max_concurrent_uni_streams(0_u8.into())
+        .max_idle_timeout(Some(IdleTimeout::from(VarInt::from_u32(120_000))));
 
     Ok(server_config)
 }
@@ -82,7 +97,8 @@ pub(crate) fn get_secure_server_config(
     let mut server_config = ServerConfig::with_single_cert(vec![cert], key)?;
     Arc::get_mut(&mut server_config.transport)
         .unwrap()
-        .max_concurrent_uni_streams(0_u8.into());
+        .max_concurrent_uni_streams(0_u8.into())
+        .max_idle_timeout(Some(IdleTimeout::from(VarInt::from_u32(120_000))));
 
     Ok(server_config)
 }

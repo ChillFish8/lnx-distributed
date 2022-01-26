@@ -219,7 +219,7 @@ async fn handle_connection<CB, OC, Req, F, F2>(
             }
         },
         Some(Err(e)) => {
-            info!("Peer errored while completing handshake {}", crate::Error::from(e));
+            warn!("Peer errored while completing handshake {}", crate::Error::from(e));
             return;
         },
         None =>{
