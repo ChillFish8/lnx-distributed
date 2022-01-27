@@ -1,9 +1,12 @@
 use std::io::Cursor;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::anyhow;
+use futures_util::AsyncWriteExt;
 use quinn::{Endpoint, Incoming, NewConnection, ReadToEndError};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -50,11 +53,13 @@ pub(crate) async fn create_server(
     Ok(incoming)
 }
 
+#[derive(Debug)]
 struct EventHandle {
     data: Vec<u8>,
     responder: oneshot::Sender<Vec<u8>>,
 }
 
+#[derive(Debug)]
 enum EventOp {
     Message(EventHandle),
     Shutdown,
@@ -63,6 +68,7 @@ enum EventOp {
 
 pub(crate) struct Client {
     sender: Sender<EventOp>,
+    connected: Arc<AtomicBool>,
 }
 
 impl Client {
@@ -91,6 +97,11 @@ impl Client {
         let t = bincode::deserialize_from(Cursor::new(data))?;
 
         Ok(t)
+    }
+
+    #[inline]
+    pub(crate) fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
     }
 
     pub(crate) async fn wake(&self) -> Result<()> {
@@ -133,11 +144,12 @@ pub(crate) async fn create_client(
     let mut endpoint = Endpoint::client(client_address)?;
     endpoint.set_default_client_config(cfg);
 
+    let connected = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel(5);
 
-    tokio::spawn(run_client(connect, server_name, endpoint, rx));
+    tokio::spawn(run_client(connect, server_name, endpoint, rx, connected.clone()));
 
-    Ok(Client { sender: tx })
+    Ok(Client { sender: tx, connected })
 }
 
 async fn run_client(
@@ -145,18 +157,21 @@ async fn run_client(
     server_name: Option<String>,
     endpoint: Endpoint,
     mut events: Receiver<EventOp>,
+    connected: Arc<AtomicBool>,
 ) {
     let server_name = server_name.unwrap_or_else(|| String::from("localhost"));
 
     loop {
-        if let Err(e) = handle_running_connection(
+        let result = handle_running_connection(
             connect_address,
             &server_name,
             &endpoint,
             &mut events,
-        )
-        .await
-        {
+            &connected,
+        ).await;
+        connected.store(false, Ordering::Relaxed);
+
+        if let Err(e) = result {
             warn!("node connection lost due to error {}", e);
         } else {
             break;
@@ -194,6 +209,7 @@ async fn handle_running_connection(
     server_name: &str,
     endpoint: &Endpoint,
     events: &mut Receiver<EventOp>,
+    connected: &Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     let mut connection_tries: u32 = 0;
 
@@ -229,6 +245,7 @@ async fn handle_running_connection(
 
         // Connection success
         connection_tries = 0;
+        connected.store(true, Ordering::Relaxed);
 
         if let Err(e) = drive_connection(conn, events).await {
             warn!(
@@ -276,6 +293,9 @@ async fn drive_connection(
                 warn!("stream was interrupted while transferring data");
                 return Err(e.into());
             };
+
+            tx.flush().await?;  // Would not believe the suffering this caused.
+            tx.close().await?;  // Would not believe the even further suffering this caused.
 
             match rx.read_to_end(MAX_BUFFER_SIZE).await {
                 Ok(buff) => {

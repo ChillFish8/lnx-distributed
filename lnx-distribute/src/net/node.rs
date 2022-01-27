@@ -90,6 +90,11 @@ where
         }
     }
 
+    #[inline]
+    pub fn is_connected(&self) -> bool {
+        self.client.is_connected()
+    }
+
     /// Send a request to the peer.
     pub async fn send<Resp: DeserializeOwned + Sized>(&self, req: &Req) -> Result<Resp> {
         self.client.send(req).await
@@ -195,40 +200,19 @@ where
     Ok(())
 }
 
-#[instrument(name = "peer-connection-server", skip(conn, on_connection, callback))]
-async fn handle_connection<CB, OC, Req, F, F2>(
+#[instrument(name = "peer-connection-server", skip(conn, callback))]
+async fn handle_connection<CB, Req, F>(
     conn: NewConnection,
     remote: SocketAddr,
-    on_connection: Arc<OC>,
     callback: Arc<CB>,
 ) where
     CB: Send + Sync + 'static + Fn(Req) -> F,
-    OC: Send + Sync + 'static + Fn(Req) -> F2,
     Req: DeserializeOwned + Sized + Send + Sync + 'static,
     F: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
-    F2: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
 {
     let mut streams = conn.bi_streams;
 
-    info!("New peer connected");
-    match streams.next().await {
-        Some(Ok((tx, rx))) => {
-            if let Err(e) = setup_handshake(on_connection, rx, tx).await {
-                warn!("Peer failed to upgrade handshake due to error {}", e);
-                return;
-            }
-        },
-        Some(Err(e)) => {
-            warn!("Peer errored while completing handshake {}", crate::Error::from(e));
-            return;
-        },
-        None =>{
-            info!("Peer closed");
-            return;
-        }
-    }
-    info!("Peer handshake complete!");
-
+    info!("New peer connected, ready to receive events!");
     while let Some(Ok((tx, rx))) = streams.next().await {
         tokio::spawn(handle_stream(remote, callback.clone(), tx, rx));
     }
@@ -247,19 +231,15 @@ impl From<Incoming> for NodeServer {
 }
 
 impl NodeServer {
-    pub async fn serve<CB, OC, Req, F, F2>(
+    pub async fn serve<CB, Req, F>(
         &mut self,
-        on_connection: OC,
         callback: CB,
     ) -> Result<()>
     where
         CB: Send + Sync + 'static + Fn(Req) -> F,
-        OC: Send + Sync + 'static + Fn(Req) -> F2,
         Req: DeserializeOwned + Sized + Send + Sync + 'static,
         F: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
-        F2: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
     {
-        let on_connection = Arc::new(on_connection);
         let callback = Arc::new(callback);
 
         while let Some(next) = self.incoming.next().await {
@@ -268,7 +248,6 @@ impl NodeServer {
             tokio::spawn(handle_connection(
                 conn,
                 remote,
-                on_connection.clone(),
                 callback.clone(),
             ));
         }
@@ -316,6 +295,49 @@ where
             Some(node) => node.send(req).await,
             None => Err(Error::UnknownNode(node_id)),
         }
+    }
+
+    /// Sends a new request to all peers.
+    pub(crate) async fn send_to_all_peers<Resp: DeserializeOwned + Sized>(
+        &self,
+        req: &Req,
+    ) -> Result<Vec<Resp>> {
+        let nodes = self.peers.read().await;
+
+        info!("sending message!");
+        let mut results = vec![];
+        for (node_id, node) in nodes.iter() {
+            debug!("Sending request to peer {}", node_id);
+
+            if let Ok(resp) = node.send(req).await {
+                results.push(resp);
+            };
+        }
+
+        Ok(results)
+    }
+
+    pub(crate) async fn send_to_all_connected_peers<Resp: DeserializeOwned + Sized>(
+        &self,
+        req: &Req,
+    ) -> Result<Vec<Resp>>  {
+        let nodes = self.peers.read().await;
+
+        info!("sending message!");
+        let mut results = vec![];
+        for (node_id, node) in nodes.iter() {
+            if !node.is_connected() {
+                continue
+            }
+
+            debug!("Sending request to peer {}", node_id);
+
+            if let Ok(resp) = node.send(req).await {
+                results.push(resp);
+            };
+        }
+
+        Ok(results)
     }
 
     /// Sends a wakeup call to all peers.
@@ -383,23 +405,15 @@ where
         self.peers.clone()
     }
 
-    pub async fn serve<CB, VH, F, VHF>(
-        &mut self,
-        validate_handshake: VH,
+    pub async fn serve<CB, F>(
+        mut self,
         callback: CB,
     ) -> Result<()>
     where
-        VH: Send + Sync + 'static + Fn(Req) -> VHF,
         CB: Send + Sync + 'static + Fn(Req) -> F,
         F: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
-        VHF: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
     {
-        self.server
-            .serve(
-                validate_handshake,
-                callback,
-            )
-            .await
+        self.server.serve(callback).await
     }
 }
 
