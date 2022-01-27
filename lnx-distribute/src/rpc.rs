@@ -108,7 +108,8 @@ impl RaftNetwork {
 
         let server = ServerHandle(heartbeat_handle, server_handle);
 
-        handle.send_to_all_connected_peers::<EmptyResponse>(&PeerRequest::HelloWorld).await?;
+        info!("sending!");
+        handle.send_to_all_peers::<EmptyResponse>(&PeerRequest::HelloWorld).await?;
 
         Ok((Self { peers: handle }, server))
     }

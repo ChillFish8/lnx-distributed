@@ -211,7 +211,7 @@ async fn handle_running_connection(
     events: &mut Receiver<EventOp>,
     connected: &Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
-    let mut connection_tries: u32 = 0;
+    let mut connection_tries: u64 = 0;
 
     while connection_tries <= 4 {
         let conn = match endpoint.connect(connect_address, server_name) {
@@ -222,7 +222,7 @@ async fn handle_running_connection(
                         warn!("failed to establish connection due to error {:?} retry_no={}", e, connection_tries);
                         connection_tries += 1;
                         tokio::time::sleep(Duration::from_secs(
-                            2i32.pow(connection_tries) as u64,
+                            2 * connection_tries,
                         ))
                         .await;
                         continue;
@@ -236,7 +236,7 @@ async fn handle_running_connection(
                 );
                 connection_tries += 1;
                 tokio::time::sleep(Duration::from_secs(
-                    2i32.pow(connection_tries) as u64
+                    2 * connection_tries
                 ))
                 .await;
                 continue;
@@ -254,8 +254,9 @@ async fn handle_running_connection(
             );
 
             connection_tries += 1;
-            tokio::time::sleep(Duration::from_secs(2i32.pow(connection_tries) as u64))
-                .await;
+            tokio::time::sleep(Duration::from_secs(
+                2 * connection_tries
+            )).await;
         } else {
             break;
         }
@@ -281,6 +282,7 @@ async fn drive_connection(
 
     info!("Peer connection ready to receive events!");
     while let Some(event_op) = events.recv().await {
+        trace!("Sending message: {:?}", event_op);
         let event = match event_op {
             EventOp::Message(ev) => ev,
             EventOp::Retry => continue,
@@ -290,7 +292,7 @@ async fn drive_connection(
         let (mut tx, rx) = conn.open_bi().await?;
         tokio::spawn(async move {
             if let Err(e) = tx.write_all(&event.data).await {
-                warn!("stream was interrupted while transferring data");
+                warn!("Stream was interrupted while transferring data");
                 return Err(e.into());
             };
 
@@ -306,7 +308,7 @@ async fn drive_connection(
                     return Err(anyhow!("unusual peer activity detected"));
                 },
                 Err(ReadToEndError::Read(e)) => {
-                    warn!("client returned an error during read");
+                    warn!("Client returned an error during read");
                     return Err(e.into());
                 },
             }
