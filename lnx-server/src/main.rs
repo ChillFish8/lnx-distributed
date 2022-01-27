@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
         bind_address: bind_addr,
         peers: map,
     };
-    let _node = rpc::RaftNetwork::connect(config).await?;
-
+    let (_node, handle) = rpc::RaftNetwork::connect(config).await?;
+    handle.wait().await?;
     Ok(())
 }

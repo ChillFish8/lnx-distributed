@@ -182,24 +182,6 @@ async fn handle_stream<CB, Req, F>(
     };
 }
 
-async fn setup_handshake<OC, Req, F>(
-    on_connection: Arc<OC>,
-    rx: RecvStream,
-    mut tx: SendStream,
-) -> anyhow::Result<()>
-where
-    OC: Send + Sync + 'static + Fn(Req) -> F,
-    Req: DeserializeOwned + Sized + Send + Sync + 'static,
-    F: Future<Output = anyhow::Result<Vec<u8>>> + Sync + Send + 'static,
-{
-    let req: Req = read_request(MAX_HANDSHAKE_SIZE, rx).await?;
-    let data = (on_connection.as_ref())(req).await?;
-
-    tx.write_all(&data).await?;
-
-    Ok(())
-}
-
 #[instrument(name = "peer-connection-server", skip(conn, callback))]
 async fn handle_connection<CB, Req, F>(
     conn: NewConnection,
@@ -304,7 +286,6 @@ where
     ) -> Result<Vec<Resp>> {
         let nodes = self.peers.read().await;
 
-        info!("sending message!");
         let mut results = vec![];
         for (node_id, node) in nodes.iter() {
             debug!("Sending request to peer {}", node_id);
@@ -323,7 +304,6 @@ where
     ) -> Result<Vec<Resp>>  {
         let nodes = self.peers.read().await;
 
-        info!("sending message!");
         let mut results = vec![];
         for (node_id, node) in nodes.iter() {
             if !node.is_connected() {
