@@ -3,6 +3,7 @@ members = [
     "lnx-server",
     "lnx-http",
     "lnx-distribute",
+    "lnx-utils",
 ]
 
 [profile.release]

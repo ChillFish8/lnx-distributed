@@ -6,18 +6,22 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+lnx-utils = { path = "../lnx-utils" }
+
 tokio = { version = "1", features = ["sync", "rt"] }
 serde = { version = "1", features = ["derive"] }
 rustls = { version = "*", features = ["quic", "dangerous_configuration"] }
 sled = { version = "0.34.7", features = ["compression"] }
+rkyv = { version = "0.7.29", features = ["alloc"] }
+openraft = { git = "https://github.com/lnx-search/rkyv-openraft.git" }  # todo lock version
 
 futures-util = "0.3.19"
 bincode = "1.3.3"
 tracing = "0.1.29"
 tracing-futures = "0.2.5"
-async-raft = "0.6.1"
 quinn = "0.8"
 rcgen = "0.8"
+parking_lot = "0.11.2"
 
 anyhow = "1.0.22"
 thiserror = "1.0.30"

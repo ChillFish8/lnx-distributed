@@ -4,7 +4,7 @@ extern crate tracing;
 use std::net::SocketAddr;
 use std::collections::HashMap;
 
-use lnx_distribute::{NodeId, rpc};
+use lnx_distribute::{NodeId, raft_network};
 use lnx_distribute::SocketKind;
 
 
@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
         bind_address: bind_addr,
         peers: map,
     };
-    let (_node, handle) = rpc::RaftNetwork::connect(config).await?;
+    let (_node, handle) = raft_network::PeerNetwork::connect(config).await?;
     handle.wait().await?;
     Ok(())
 }

@@ -1,5 +1,5 @@
-use async_raft::NodeId;
 use quinn::{ApplicationClose, ConnectError, ConnectionClose, ConnectionError};
+use crate::NodeId;
 
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -22,6 +22,9 @@ pub enum Error {
 
     #[error("attempted to interact with a unknown peer node {0}")]
     UnknownNode(NodeId),
+
+    #[error("{0}")]
+    Other(#[from] anyhow::Error),
 }
 
 impl From<ConnectError> for Error {

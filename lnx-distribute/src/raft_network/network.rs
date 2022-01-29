@@ -1,20 +1,16 @@
+
 use std::time::Duration;
-use rustls::internal::msgs::enums::HeartbeatMessageType::Request;
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 use tokio::task::JoinHandle;
-use crate::net::PeersHandle;
 
-use super::net;
+use crate::net::PeersHandle;
+use crate::{net, NodeId};
 use crate::Result;
+use super::request::PeerRequest;
 
 pub const HEARTBEAT_INTERVAL: u64 = 30;
 
-#[derive(Debug, Serialize, Deserialize)]
-pub enum PeerRequest {
-    HeartBeat,
-    HelloWorld,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EmptyResponse;
@@ -23,7 +19,6 @@ pub struct EmptyResponse;
 pub struct Response {
 
 }
-
 
 async fn handle_event(
     peers: PeersHandle<PeerRequest>,
@@ -57,11 +52,12 @@ impl ServerHandle {
 }
 
 
-pub struct RaftNetwork {
+#[derive(Clone)]
+pub struct PeerNetwork {
     peers: net::PeersHandle<PeerRequest>,
 }
 
-impl RaftNetwork {
+impl PeerNetwork {
     /// Starts the node server and attempts to connect to all RPC peers.
     ///
     /// Note this this will accept some nodes being unavailable and will attempt a
@@ -112,5 +108,13 @@ impl RaftNetwork {
         handle.send_to_all_peers::<EmptyResponse>(&PeerRequest::HelloWorld).await?;
 
         Ok((Self { peers: handle }, server))
+    }
+
+    /// Send a request to a peer.
+    pub async fn send_request<Resp>(&self, node_id: NodeId, req: &PeerRequest) -> Result<()>
+    where
+        Resp: DeserializeOwned + Serialize +Sized + Send + Sync + 'static
+    {
+        self.peers.send_to_peer(node_id, req).await
     }
 }

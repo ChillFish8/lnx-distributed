@@ -1,6 +1,8 @@
 mod error;
 mod net;
-pub mod rpc;
+pub mod raft_network;
+mod raft;
+mod raft_store;
 
 #[macro_use]
 extern crate tracing;
