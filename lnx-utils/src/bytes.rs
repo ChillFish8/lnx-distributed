@@ -1,3 +1,8 @@
+/// A set of helper utility when working with Rkyv bytes.
+///
+/// Note that this is built upon alot of unsafe and assumes that the types
+/// and data these operations are being applied to are fully aligned.
+
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::pin::Pin;
