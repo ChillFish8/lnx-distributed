@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use openraft::{AppData, EffectiveMembership};
-use rkyv::{Archive, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use sled::IVec;
 
 
-#[derive(Archive, Serialize, Deserialize, Copy, Clone, Debug)]
+#[derive(Serialize, Deserialize, Copy, Clone, Debug)]
 pub struct LogId(u64);
 
 
 /// The application data request type.
-#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ClientRequest {
     /// The ID of the client which has sent the request.
     pub client: String,
@@ -25,7 +25,7 @@ impl AppData for ClientRequest {}
 
 
 /// The state machine of the raft node.
-#[derive(Archive, Serialize, Deserialize, Debug, Default, Clone)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct StoreStateMachine {
     pub last_applied_log: Option<LogId>,
 

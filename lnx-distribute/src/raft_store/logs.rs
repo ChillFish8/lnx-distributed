@@ -22,8 +22,8 @@ impl LogStore {
     pub fn append_logs(&self, logs: &[&Entry<ClientRequest>]) -> Result<()> {
         for log in logs {
             self.db.insert(
-                log.log_id.as_boxed_bytes()?,
-                log.payload.as_boxed_bytes()?,
+                log.log_id.as_bytes()?,
+                log.payload.as_bytes()?,
             )?;
         }
 

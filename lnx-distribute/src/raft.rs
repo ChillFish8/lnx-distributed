@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
-use rkyv::{Archive, Serialize, Deserialize};
+use serde::{Serialize, Deserialize};
 use openraft::{AppData, AppDataResponse, EffectiveMembership, LogId, SnapshotMeta};
 use parking_lot::RwLock;
 
 
 
 /// The application data response type.
-#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ClientResponse(Option<Vec<u8>>);
 
 impl AppDataResponse for ClientResponse {}

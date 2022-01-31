@@ -3,6 +3,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 use tokio::task::JoinHandle;
+use lnx_utils::bytes::AsBytes;
 
 use crate::net::PeersHandle;
 use crate::{net, NodeId};
@@ -27,9 +28,9 @@ async fn handle_event(
     let data = match request {
         PeerRequest::HelloWorld => {
             peers.retry_all_peers().await?;
-            bincode::serialize(&EmptyResponse)?
+            EmptyResponse.as_bytes()?
         },
-        PeerRequest::HeartBeat => bincode::serialize(&EmptyResponse)?,
+        PeerRequest::HeartBeat => EmptyResponse.as_bytes()?,
     };
 
     Ok(data)
